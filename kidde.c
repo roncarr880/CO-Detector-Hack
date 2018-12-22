@@ -45,10 +45,20 @@ char switches;     /* read two bits on the B port */
 /* bank 0 ram - 80 locations */
 /* any arrays need to be in page 0 or page 1 as the IRP bit is not updated */
 #pragma pic  32
+/* integer math vars */
+char accl;
+char acch;
+char argl;
+char argh;
+char overflow;
+char carry;
+
 
 
 /* bank 1 ram - 80 bytes - placing variables here may speed code when also accessing bank1 registers */
 #pragma pic  160
+char result_high;
+char result_low;
 
 /* bank 2 ram - no arrays - 80 locations - function args and statics are also here */
 #pragma pic 288
@@ -71,7 +81,7 @@ static char temp;
 
    holdoff = counter = 0;
    adder = 1;
-   load_display( counter );
+   char_display( counter );
    temp = ticks;
 
 for(;;){    /* loop main */
@@ -87,7 +97,7 @@ for(;;){    /* loop main */
 
    if( ticks >= 250 ){        /* display changes 4 times a second */
       counter += adder;
-      load_display( counter );
+      char_display( counter );
       ticks = 0;
    }
    temp = ticks;   
@@ -95,9 +105,60 @@ for(;;){    /* loop main */
 }
 }
 
-load_display( char val ){    /* displays 0 to 255 */
-static char t;
+ad_convert( ){   /* special ad conversion on channel AD0 with pre-discharge and sample and hold */
 
+   ADCON0 =  1 + 64;    /* on, fosc/8 for 4 meg clock */
+   ADCON1 = 128;                        /* right justified result */
+   TRISA = ( 1+64 ) ^ 0xff;
+   PORTA = 0;           /* discharge */
+   #asm
+     nop
+     nop
+     nop
+     nop
+     nop
+   #endasm
+   TRISA = 64 ^ 0xff;
+   PORTA = 64;          /* sample */
+   #asm
+     nop
+     clrf PORTA         ; hold after 2 us
+          
+     nop
+     nop
+     nop
+     nop
+     nop            ;  min sample time 5 us
+     
+     nop
+     nop
+     nop
+   #endasm
+
+   ADCON0 |= 2;        /* go bit */
+   #asm
+     nop
+     nop
+     nop
+   #endasm
+   while( ADCON0 & 2 );  /* wait for done */
+
+
+   result_low = ADRESL;
+   result_high = ADRESH;
+
+}
+
+char_display( char val ){    /* displays 0 to 255 */
+/*static char t;*/
+
+
+accl  = val;
+acch = 0;
+int_display();
+
+
+/*
    t = 0;
    while( val >= 100 ) ++t , val -= 100;
    digits[2] = segment[t];
@@ -106,10 +167,105 @@ static char t;
    while( val >= 10 ) ++t , val -= 10;
    digits[1] = segment[t];
    digits[0] = segment[val];
+*/
+}
+
+zacc(){          /* zero accumulator */
+
+   accl = acch = 0;
+}
+
+char dadd(){     /* double add, return carry */
+
+   #asm
+      BANKSEL overflow
+      clrf    overflow
+      clrf    carry
+
+      movf	argl,W
+      addwf	accl,F          ; add low bytes
+      btfsc   STATUS,C
+      incf    carry,F          ; save carry
+
+      movf	carry,W        ; add the carry if any to high byte
+      addwf	acch,F
+
+      btfsc   STATUS,C
+      incf    overflow,F        ; capture and save if adding one caused overflow 
+
+      movf	argh,W          ; add the high bytes
+      addwf	acch,F
+
+      btfsc   STATUS,C
+      incf    overflow,F        ; merge in if had an overflow here
+
+   #endasm
+
+   return overflow;     /* return 0, 1, or 2 */
+   
+}
+
+char dsub(){    /* double subb, return borrow as a true value */
+
+
+   #asm
+
+      BANKSEL overflow
+      clrf    overflow
+      clrf    carry
+
+      movf	argl,W
+      subwf	accl,F          ; sub low bytes
+      btfss   STATUS,C         ; carry set means no borrow, skip next
+      incf    carry,F          ; save borrow
+
+      movf	carry,W        ; sub the borrow if any from high byte
+      subwf	acch,F
+
+      btfss   STATUS,C
+      incf    overflow,F        ; capture and save if subbing one caused a borrow 
+
+      movf	argh,W          ; sub the high bytes
+      subwf	acch,F
+
+      btfss   STATUS,C
+      incf    overflow,F        ; merge in if had a borrow here
+
+   #endasm
+   return overflow;     /* return borrow as true */
 
 }
 
+int_display(){   /* assigns digits[].  Display accumulator value in base 10.  0 to 999 */
+static char t;
 
+   /* before calling, one must load the accumulator with the value to display */
+
+   /* load the arg with 1000 */
+   t = dp = 0;
+   argh = 3;
+   argl = 0xe8;
+   while( dsub() == 0 ) ++t;    /* repeated subtraction is division */
+   if( t ) dp = 4 + 8 + 0x10;   /* light all the decimal points to show value is above 999 */
+   dadd();                      /* restore accumulator to the value before we overflowed */
+
+   /* load the arg with 100 */
+   t = 0;
+   argh = 0;
+   argl = 100;
+   while( dsub() == 0 ) ++t;
+   dadd();
+   digits[2] = segment[t];
+
+   t = 0;
+   argl= 10;
+   while( dsub() == 0 ) ++t;
+   dadd();
+   digits[1] = segment[t];
+   
+   digits[0] = segment[accl];
+      
+}
 
 #pragma longcall
 
