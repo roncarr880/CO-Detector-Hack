@@ -41,23 +41,8 @@ struct EVENT{
 /* eeprom   ( uses the extern keyword ) */
 /* seven segment data will need to be complimented before displaying for the common anode display */
 extern char segment[16] = {0x3f,0x06,0x5b,0x4f,0x66,0x6d,0x7d,0x07,0x7f,0x6f,0x77,0x7c,0x58,0x5e,0x79,0x71};
-extern char dummy[1]= 0xff;            /* used to read events as a linear array */
-extern struct EVENT eevent[16] = {
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
-     {0xff,0xff,0xff,0xff,0xff,0xff,0xff },
+extern char dummy[1]= 0xff;            /* used to read eevents[] as a linear array */
+extern struct EVENT eevent[1] = {      /* this array is really size 32 which pretty much uses all the eemprom */
      {0xff,0xff,0xff,0xff,0xff,0xff,0xff }
      };
 
@@ -79,6 +64,7 @@ char dig_count;    /* count representation of which multiplexed digit 0 1 or 2 *
 char portb;        /* ram copy of port b data */
 char ticks;        /* ms counter */
 char switches;     /* read two bits on the B port */
+char fsr_temp;     /* interrupt is using the fsr */
 
 
 /* bank 0 ram - 80 locations */
@@ -97,34 +83,40 @@ char minutes;
 char hours;
 
 char days;
-char sum_low;
-char sum_high;
+char result_low;
+char result_high;
 char pos_slip;
 char neg_slip;
 char dis_what;
 char in_progress;    /* voltage anomaly happening */
-char in_prog_count;  /* noise descriminator count */
+char event_holdoff;  
 char ee_index;       /* next available write slot */
 char ee_adr;
 
 char dis_state;
 char dis_event;
 char new_event;
-
-
 struct EVENT event0;
-char bank_bug;           /* must be in same bank as the structure. Error of missing banksel in generated code */
 
-/* bank 1 ram - 80 bytes - placing variables here may speed code when also accessing bank1 registers */
-#pragma pic  160
-char result_low;
-char result_high;
+char bank_bug;           /* must be in same bank as the structure. Error of missing banksel in generated code */
 char res0_l;
 char res0_h;
 char res1_l;
 char res1_h;
 char res2_l;
 char res2_h;
+char divqh;
+char divql;
+char divi;
+
+char sum_low[4];
+char sum_high[4];
+
+struct EVENT event1;   /* event to write,  7 chars long */
+
+
+/* bank 1 ram - 80 bytes - placing variables here may speed code when also accessing bank1 registers */
+#pragma pic  160
 
 /* bank 2 ram - no arrays - 80 locations - function args and statics are also here */
 #pragma pic 288
@@ -199,7 +191,7 @@ for(;;){    /* loop main */
       if( switches & 32 ){                             /* display events, previous event */
           dis_state = 0;
           if( dis_what != 3 ) dis_what = 3;
-          else dis_event = (dis_event - 1) & 15;       /* right is previous event */
+          else dis_event = (dis_event - 1) & 31;       /* right is previous event */
       }
       if( switches &  128) dis_what = (dis_what + 1) & 3 , dis_state = 0;   /* left is display what */
    }   
@@ -226,13 +218,13 @@ static char t;
    switch( dis_state ){
 
       case 0:      /* starting a new event to display */
-         for(j = 0; j < 16; ++j){
+         for(j = 0; j < 32; ++j){
             index = 1;              
             i = dis_event;
             while( i-- ) index += 7;
             if( dummy[index + 4] != 0xff ) break;    /* check hours has been written with a value */
             --dis_event;
-            dis_event &= 15;
+            dis_event &= 31;
          }
          char_display( dis_event );
          digits[2] = segment[14];    /* overwrite msb with the letter E */         
@@ -285,17 +277,6 @@ static char t;
           digits[0] = G_ + E_ + D_;
       break;
 
-      case 14:     /* sub out 4 seconds if event is short */
-          i = dummy[index+6];
-          if( dummy[index+5] ) char_display(i);   /* minutes has non zero time, so just ignore the extra 4 seconds */
-          else{                                   /* ignored so don't have to borrow from minutes hours days */
-               i = i - 3;                         /* leave a second in for the detect start time taken */
-               if( i > 59 ) i = 0;
-               char_display(i);                   /* 4 seconds is the time taken to detect the end of the event */
-          }
-          t = 1;                                  
-      break;
-
       default:    /* values */   
           i = ( dis_state - 2 ) >> 1;
           char_display( dummy[index + i] );
@@ -308,28 +289,43 @@ static char t;
    if( dis_state >= 15 ) dis_state = 1;
 }
 
-convert_timer(){   /* get a result from 3 conversions every 200 ms. 5 results a second */
+convert_timer(){   /* average 8 conversions every 200 ms. 5 results a second */
 static char slip;  /* attempt to lock on 60 cycle phase */
 static char timer;
 
    --timer;
 
-   if( timer == 147 ){   /* phase 240 */
+   if( timer == 177 ){   /* phase 240 */
       ad_convert();
       res2_l = result_low;
       res2_h = result_high;
    }
 
-   if( timer == 75 ){   /* phase 120 */
+   if( timer == 155 ){   /* phase 120 */
       ad_convert();
       res1_l = result_low;
       res1_h = result_high;
    }
 
-   if( timer == 3 ){    /* phase 0 */
+   if( timer == 117 ){    /* phase 0, 1st conversion */
       ad_convert();
       res0_l = result_low;
       res0_h = result_high;
+   }
+
+   if( timer == 100 || timer == 83 || timer == 67 || timer == 50 || timer == 33 || timer == 17 || timer == 1 ){
+      ad_convert();
+      accl = res0_l;  acch = res0_h;
+      argl = result_low; argh = result_high;
+      dadd();
+      res0_l = accl;  res0_h = acch;
+   }
+
+   if( timer == 1 ){    /* phase 0 final calculation*/
+      right_shift(3);        /* average of 8 samples, accumulator still has the results */
+      res0_l = accl;
+      res0_h = acch;
+      if( dis_what == 2 ) int_display():   /* display raw numbers */
       if( looks_ok() ) ave_values();
    }
    
@@ -354,17 +350,24 @@ static char timer;
 
 }
 
-ave_values(){   /* average 4 values, convert to voltage and then display */
+ave_values(){   /* running average 4 values, convert to voltage and then display */
 static char t;  /* rough voltage calculation is ( raw - 48 ) / 2 */
                 /* better calculation is (raw - 20) / 2.25 */
                 /* or (raw - 20 ) * 4 / 9 */
+static char i;
 
-   acch = sum_high;
-   accl = sum_low;
-   argh = res0_h;
-   argl = res0_l;
-   dadd();
-   if( ++t >= 4 ){
+   ++i;
+   i &= 3;
+   sum_high[i] = res0_h;
+   sum_low[i] = res0_l;
+   
+   zacc();
+   for( t = 0; t < 4; ++t ){
+      argh = sum_high[t];
+      argl = sum_low[t];
+      dadd();
+   }
+   
       argl = 4*20;
       argh = 0;
       if( dsub() ) zacc();    /* sub out 4 * 20 and if borrow then call it zero */
@@ -372,20 +375,17 @@ static char t;  /* rough voltage calculation is ( raw - 48 ) / 2 */
       /* argl = accl;  argh = acch; */
       /* dadd(); dadd(); dadd(); */    /* mult by 4 not needed as already 4 times the proper value */
 
-      argl = 9;  argh = 0;   /* set up for divide by repeated subtraction, assume result is 8 bits */
-      t = 0;
-      while( dsub() == 0 ) ++t;
-      if( dis_what == 0 ) char_display(t);
-      else if( dis_what == 2 ){
-         acch = res0_h;  accl = res0_l;  int_display();  /* display raw */
-      }
-      event_check(t);
-      t = sum_high = sum_low = 0;
-   }
-   else{
-      sum_high = acch;
-      sum_low  = accl;
-   }
+      argl = 9;  argh = 0;   /* set up for divide by 9 */
+      divql = accl;   divqh = acch;
+      divide();
+
+      acch = divqh;
+      t = accl = divql;    /* save a copy in t and assume 8 bit result */
+ 
+      if( i == 0 && dis_what == 0 ) int_display();   /* display only 1 of 4 times */
+      
+      event_check(t);   /* now 4 times faster using a running average */
+   
 }
 
 char looks_ok(){   /* avoid saving values when the timers and 60 cycle look out of sync */
@@ -422,8 +422,8 @@ ad_convert( ){   /* special ad conversion on channel AD0 with pre-discharge and 
      nop
      nop
 
-    ; nop      ; double discharge time any different? one count with zero series resistance
-    ; nop
+     nop      ; double discharge time any different? one count with zero series resistance
+     nop
     ; nop
     ; nop
     ; nop
@@ -500,6 +500,18 @@ char dadd(){     /* double add, return carry */
    
 }
 
+right_shift( char count ){   /* unsigned shift double (or divide by 2) the accumulator */
+
+   while( count-- ){
+     #asm
+        banksel  acch
+        bcf   STATUS,C      ; logical shift right double
+        rrf   acch,F
+        rrf   accl,F
+     #endasm
+   }
+}
+
 char dsub(){    /* double subb, return borrow as a true value */
 
 
@@ -533,6 +545,7 @@ char dsub(){    /* double subb, return borrow as a true value */
 
 int_display(){   /* assigns digits[].  Display accumulator value in base 10.  0 to 999 */
 static char t;
+static char t2;   /* to blank leading zero's */
 
    /* before calling, one must load the accumulator with the value to display */
 
@@ -542,6 +555,7 @@ static char t;
    argl = 0xe8;
    while( dsub() == 0 ) ++t;    /* repeated subtraction is division */
    if( t ) dp = 4 + 8 + 0x10;   /* light all the decimal points to show value is above 999 */
+   t2 = t;
    dadd();                      /* restore accumulator to the value before we overflowed */
 
    /* load the arg with 100 */
@@ -550,15 +564,19 @@ static char t;
    argl = 100;
    while( dsub() == 0 ) ++t;
    dadd();
-   digits[2] = segment[t];
+   t2 += t;
+   if( t == 0 && t2 == 0 ) digits[2] = 0;
+   else digits[2] = segment[t];
 
    t = 0;
    argl= 10;
    while( dsub() == 0 ) ++t;
    dadd();
-   digits[1] = segment[t];
+   if( t == 0 && t2 == 0 ) digits[1] = 0;
+   else digits[1] = segment[t];
    
    digits[0] = segment[accl];
+   
       
 }
 
@@ -578,6 +596,26 @@ no_interrupts(){
       goto $-2
    #endasm
 
+}
+
+
+/* a divide algorithm */
+/* dividend quotient has the dividend, argh,argl has the divisor, remainder in acch,accl */
+
+divide(){
+ 
+   zacc();
+   for( divi = 0; divi < 16; ++divi ){
+      #asm
+        bcf   STATUS,C
+        rlf   divql,F
+        rlf   divqh,F
+        rlf   accl,F
+        rlf   acch,F
+      #endasm
+      if( dsub() ) dadd();     /* borrow, add back */
+      else divql |= 1;         /* no borrow, so set a 1 in quotient */
+   }
 }
 
 #pragma longcall
@@ -616,7 +654,7 @@ init(){       /* any page, called once from reset */
    dig_bit   = 4;
    days = hours = minutes = dis_what = seconds = quarter_sec = 0;
    pos_slip = neg_slip = 0;
-   ee_index = in_progress = in_prog_count = 0;
+   event_holdoff = ee_index = in_progress = 0;
    dis_event = new_event = 0;
 
 /* start timer */
@@ -640,6 +678,8 @@ _interrupt(){  /* status has been saved */
    TMR1L += (T1LOW + 6 + 2);   /*  adjust for timer off time */
    T1CON= T1ON;  
    ++ticks;              /* count milliseconds */
+
+   fsr_temp = FSR;
 
    /* mux the display and read the switches */
    PORTC &= (( 4+8+0x10 ) ^ 0xff);        /* display off */
@@ -665,6 +705,9 @@ _interrupt(){  /* status has been saved */
    }
 
 /* restore status */
+
+   FSR = fsr_temp;
+
 #asm
        banksel    PIR1                       ; clear timer 1 interrupt flag
        bcf        PIR1,TMR1IF
@@ -687,23 +730,33 @@ _interrupt(){  /* status has been saved */
 
 lc_event_check( char value ){
 
+   bank_bug = value;
+   if( in_progress || event_holdoff >= 1 ){   /* capture high and low limits */
+     if( bank_bug > event0.high ) event0.high = bank_bug;    
+     if( bank_bug < event0.low  ) event0.low  = bank_bug;                            
+   }
+   else  event0.low = event0.high = bank_bug;
+      /* capture pre-event values as high and low for the next event */
+
    if( in_progress ){
       check_end( value );
       return;
    }
 
-   /* else we are looking for an event start */
+   if( event_holdoff ){           /* about 52 seconds to merge events */
+      if( --event_holdoff == 0 ) event_save();
+   }
+
+   /* we are looking for an event start or event re-start */
    if( in_band( value ) ) return;   /* voltage ok */
 
-   /* maybe an event */
-   if( ++in_prog_count >= 2 ){
-      /* start an event, save time and set hi and low to nominal */
+   /* an event */
+   if( event_holdoff == 0 ){    /* start an event, zero the times */
      event0.age = days;     /* day logged, age calculated when display the data */
-     event0.low = event0.high = NOMINAL;
      event0.days = event0.hours = event0.minutes = event0.seconds = 0;
-     in_progress = 1;
-     in_prog_count = 0;
    }
+   in_progress = 1;
+   event_holdoff = 255;     /* event started or restarting the previous event */
 
 }
 
@@ -713,23 +766,17 @@ static char t;                 /* expression simplifier needed */
 
   t = in_band( value );
   if( t == 0 ){          /* still have an issue on AC line */
-      /* before returning, want to log highest and lowest voltage */
-     if( value > event0.high ){
-        bank_bug = value;
-        event0.high = bank_bug;
-     }
-     if( value < event0.low  ){
-        bank_bug = value;
-        event0.low  = bank_bug;
-     }                           
-     in_prog_count = 0;
-  }else{          /* detect if the end and save */
-     if( ++in_prog_count > 5 ){   /* yes it is ok for 4 seconds */
-        /* save event to eeprom */
-        event_save();
-        in_progress = 0;
-        in_prog_count = 0; 
-     }
+     event_holdoff = 255;
+  }else{          /* save current data to the 2nd structure */
+     event1.age = event0.age;
+     event1.low = event0.low;
+     event1.high = event0.high;
+     event1.days = event0.days;
+     event1.hours = event0.hours;
+     event1.minutes = event0.minutes;
+     event1.seconds = event0.seconds;
+
+     in_progress = 0;
   }
 
 }
@@ -777,56 +824,58 @@ _eewrite
 
 event_save(){
 static char i;
- 
+
+     /* avoid saving just noise spike */ 
+     if( event1.seconds == 0 && event1.minutes == 0 && event1.hours == 0 && event1.days == 0 ) return;
 
      /* multiply not supported with this compiler, calculate an offset */
      
      ee_adr = 17; i = ee_index;     /* hardcoded offset, don't move ee data around */
      while( i-- ) ee_adr += 7;
 
-     _eedata = event0.age;
+     _eedata = event1.age;
      #asm
      movf  ee_adr,W
      call _eewrite
      #endasm
 
      ++ee_adr;
-     _eedata = event0.low;
+     _eedata = event1.low;
      #asm
      movf  ee_adr,W
      call _eewrite
      #endasm
 
      ++ee_adr;
-     _eedata = event0.high;
+     _eedata = event1.high;
      #asm
      movf  ee_adr,W
      call _eewrite
      #endasm
 
      ++ee_adr;
-     _eedata = event0.days;
+     _eedata = event1.days;
      #asm
      movf  ee_adr,W
      call _eewrite
      #endasm
 
      ++ee_adr;
-     _eedata = event0.hours;
+     _eedata = event1.hours;
      #asm
      movf  ee_adr,W
      call _eewrite
      #endasm
 
      ++ee_adr;
-     _eedata = event0.minutes;
+     _eedata = event1.minutes;
      #asm
      movf  ee_adr,W
      call _eewrite
      #endasm
 
      ++ee_adr;
-     _eedata = event0.seconds;
+     _eedata = event1.seconds;
      #asm
      movf  ee_adr,W
      call _eewrite
@@ -834,7 +883,7 @@ static char i;
 
     dis_event = ee_index;  /* display the latest when enter the display events routine */
     ++ee_index;           /* point to next one to write */
-    ee_index &= 15;
+    ee_index &= 31;
     new_event = 1;
     
 }
