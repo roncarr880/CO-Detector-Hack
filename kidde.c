@@ -111,6 +111,8 @@ char divi;
 
 char sum_low[4];
 char sum_high[4];
+char clean_index;    /* for eeprom event erase */
+char ee_data;        /* temp storage for checking if data the same before writing eeprom */
 
 struct EVENT event1;   /* event to write,  7 chars long */
 
@@ -175,8 +177,8 @@ for(;;){    /* loop main */
    if( minutes >= 60 ) minutes -= 60, ++hours;
    if( hours >= 24 ){
       hours -= 24, ++days;
-      /* set a flag to wipe out any events logged 256 days ago, ie age = days */
-      /* empty flag can be value 255 in the hours field ( normally not over 23 ) */
+      /* wipe out any events logged 256 days ago, ie age = days */
+      ee_cleanup();
    }
    /* event time, just let this run all the time and reset to zero when detect an AC line event */
    if( event0.seconds >= 60 ) event0.seconds = event0.seconds - 60, event0.minutes = event0.minutes + 1;
@@ -372,15 +374,10 @@ static char i;
       argh = 0;
       if( dsub() ) zacc();    /* sub out 4 * 20 and if borrow then call it zero */
 
-      /* argl = accl;  argh = acch; */
-      /* dadd(); dadd(); dadd(); */    /* mult by 4 not needed as already 4 times the proper value */
+      /* multiply( 4 ); */    /* mult by 4 not needed as already 4 times the proper value */
 
-      argl = 9;  argh = 0;   /* set up for divide by 9 */
-      divql = accl;   divqh = acch;
-      divide();
-
-      acch = divqh;
-      t = accl = divql;    /* save a copy in t and assume 8 bit result */
+      divide_k( 9 );         /* divide accum by constant or a char */
+      t = accl;        /* save a copy in t and assume 8 bit result */
  
       if( i == 0 && dis_what == 0 ) int_display();   /* display only 1 of 4 times */
       
@@ -601,6 +598,9 @@ no_interrupts(){
 
 /* a divide algorithm */
 /* dividend quotient has the dividend, argh,argl has the divisor, remainder in acch,accl */
+/* shift upper bits of the dividend into the remainder, test a subtraction of the divisor */
+/* restore the remainder on borrow, or set a bit in quotient if no borrow */
+/* divisor remains unchanged */
 
 divide(){
  
@@ -608,7 +608,7 @@ divide(){
    for( divi = 0; divi < 16; ++divi ){
       #asm
         bcf   STATUS,C
-        rlf   divql,F
+        rlf   divql,F        ; banksel ok here, same as divi
         rlf   divqh,F
         rlf   accl,F
         rlf   acch,F
@@ -617,6 +617,47 @@ divide(){
       else divql |= 1;         /* no borrow, so set a 1 in quotient */
    }
 }
+
+divide_k( char constant ){      /* divide accumulator by a constant or char */
+                                /* put result in the accum overwriting remainder */
+   
+   divql = accl;   divqh = acch;
+   argh  = 0;      argl = constant;
+   divide();
+   accl = divql;   acch = divqh;
+}
+
+
+/* unused, untested multiply routine */
+/* 8 by 16 bit multiply, unsigned, assume result fits in 16 bits, return overflow if not */
+/* 
+   acch,accl has multiplicand, moved to argh,argl.
+   8 bit multiplier as function argument,   product in acch,accl
+   add increasing powers of 2 of the multiplicand to the product depending upon bits set in the multiplier
+*/
+char multiply( char multi ){
+static char over;
+
+    over = 0;
+    divi = multi;  /* use a same bank variable as the multiplier variable */
+    argh = acch;   /* get the multiplicand out of the accumulator */
+    argl = accl;
+    zacc();
+
+    while( divi ){
+       if( divi & 1 ) over |= dadd();
+       divi >>= 1;
+       #asm
+          ; banksel argl     ; multi and argl in different banks, fixed by using divi
+          bcf  STATUS,C
+          rlf  argl,F
+          rlf  argh,F
+       #endasm
+    }
+
+    return over;
+}
+
 
 #pragma longcall
 
@@ -627,6 +668,10 @@ divide(){
 
 event_check( char val ){
    lc_event_check( val );
+}
+
+ee_cleanup(){
+   lc_ee_cleanup();
 }
 /* end of page 0 program section */
 
@@ -656,6 +701,11 @@ init(){       /* any page, called once from reset */
    pos_slip = neg_slip = 0;
    event_holdoff = ee_index = in_progress = 0;
    dis_event = new_event = 0;
+
+   for( _temp = 0; _temp < 4; ++_temp ){   /* fix startup event logging high volts */
+     sum_high[_temp] = 0;
+     sum_low[_temp] = 0;
+   }
 
 /* start timer */
    TMR1H = T1HIGH;     /* with 4 meg clock, interrupt at 1ms rate */
@@ -731,11 +781,11 @@ _interrupt(){  /* status has been saved */
 lc_event_check( char value ){
 
    bank_bug = value;
-   if( in_progress || event_holdoff >= 1 ){   /* capture high and low limits */
+   if( in_progress ){   /* capture high and low limits */
      if( bank_bug > event0.high ) event0.high = bank_bug;    
      if( bank_bug < event0.low  ) event0.low  = bank_bug;                            
    }
-   else  event0.low = event0.high = bank_bug;
+   else if( event_holdoff == 0 ) event0.low = event0.high = bank_bug;
       /* capture pre-event values as high and low for the next event */
 
    if( in_progress ){
@@ -799,11 +849,11 @@ _eewrite
 
       banksel EECON1
       bsf     EECON1,WREN
-      bcf     INTCON,GIE
+      bcf     INTCON,GIE           ; disable interrupts
       btfsc   INTCON,GIE
       goto    $-2
 
-      movlw   0x55
+      movlw   0x55      
       movwf   EECON2
       movlw   0xaa
       movwf   EECON2
@@ -828,58 +878,37 @@ static char i;
      /* avoid saving just noise spike */ 
      if( event1.seconds == 0 && event1.minutes == 0 && event1.hours == 0 && event1.days == 0 ) return;
 
-     /* multiply not supported with this compiler, calculate an offset */
+     /* compiler too simple, calculate an offset */
      
      ee_adr = 17; i = ee_index;     /* hardcoded offset, don't move ee data around */
      while( i-- ) ee_adr += 7;
 
-     _eedata = event1.age;
-     #asm
-     movf  ee_adr,W
-     call _eewrite
-     #endasm
+     ee_data = event1.age;
+     eecheck_write();
 
      ++ee_adr;
-     _eedata = event1.low;
-     #asm
-     movf  ee_adr,W
-     call _eewrite
-     #endasm
+     ee_data = event1.low;
+     eecheck_write():
 
      ++ee_adr;
-     _eedata = event1.high;
-     #asm
-     movf  ee_adr,W
-     call _eewrite
-     #endasm
+     ee_data = event1.high;
+     eecheck_write();
 
      ++ee_adr;
-     _eedata = event1.days;
-     #asm
-     movf  ee_adr,W
-     call _eewrite
-     #endasm
+     ee_data = event1.days;
+     eecheck_write();
 
      ++ee_adr;
-     _eedata = event1.hours;
-     #asm
-     movf  ee_adr,W
-     call _eewrite
-     #endasm
+     ee_data = event1.hours;
+     eecheck_write();
 
      ++ee_adr;
-     _eedata = event1.minutes;
-     #asm
-     movf  ee_adr,W
-     call _eewrite
-     #endasm
+     ee_data = event1.minutes;
+     eecheck_write();
 
      ++ee_adr;
-     _eedata = event1.seconds;
-     #asm
-     movf  ee_adr,W
-     call _eewrite
-     #endasm
+     ee_data = event1.seconds;
+     eecheck_write();
 
     dis_event = ee_index;  /* display the latest when enter the display events routine */
     ++ee_index;           /* point to next one to write */
@@ -888,3 +917,31 @@ static char i;
     
 }
 
+lc_ee_cleanup(){         /* set hours to 0xff for any saved events on current days value */
+static char i;
+
+   clean_index = 1;
+
+   for( i = 0; i < 32; ++i ){
+      if( dummy[clean_index] == days ){
+            ee_adr = 16 + 4 + clean_index;
+            ee_data = 0xff;
+            eecheck_write();
+      }   
+      clean_index += 7;
+   }
+
+}
+
+eecheck_write(){    /* check if data matches before eewrite */
+                    /* data to write in ee_data, address in ee_adr */
+
+/* fudging the addressing to eeprom because of compiler issues with struct, the segment array is at zero offset */
+    if( ee_data != segment[ee_adr] ){    /* reading past end of segment array */
+        _eedata = ee_data;
+        #asm
+          movf ee_adr,W
+          call _eewrite
+        #endasm
+    }
+}

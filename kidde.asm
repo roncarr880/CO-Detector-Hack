@@ -1198,8 +1198,12 @@ divi	equ 71
 sum_low	equ 72
 ; char sum_high [ 4 ] ; 
 sum_high	equ 76
+; char clean_index ; 
+clean_index	equ 80
+; char ee_data ; 
+ee_data	equ 81
 ; struct EVENT event1 ; 
-event1	equ 80
+event1	equ 82
 ; # pragma pic 160 
 ; # pragma pic 288 
 ; # pragma shortcall 
@@ -1383,6 +1387,8 @@ TLF23
 	movlw	24
 	subwf	hours,F
 	incf	days,F
+; ee_cleanup ( ) ; 
+	call	ee_cleanup
 ; } 
 ; if ( event0 . seconds >= 60 ) event0 . seconds = event0 . seconds - 60 , event0 . minutes = event0 . minutes + 1 ; 
 TLF24
@@ -2142,27 +2148,13 @@ TLF94
 	btfsc	STATUS,Z
 	goto	TLF95
 	call	zacc
-; argl = 9 ; argh = 0 ; 
+; divide_k ( 9 ) ; 
 TLF95
 	movlw	9
-	BANKSEL	argl
-	movwf	argl
-;movlw	0
-	clrf 	argh
-; divql = accl ; divqh = acch ; 
+	call	divide_k
+; t = accl ; 
+	BANKSEL	accl
 	movf	accl,W
-	movwf	divql
-	movf	acch,W
-	movwf	divqh
-; divide ( ) ; 
-	call	divide
-; acch = divqh ; 
-	BANKSEL	divqh
-	movf	divqh,W
-	movwf	acch
-; t = accl = divql ; 
-	movf	divql,W
-	movwf	accl
 	bsf	STATUS,RP1
 	movwf	TLF90
 ; if ( i == 0 && dis_what == 0 ) int_display ( ) ; 
@@ -2636,7 +2628,7 @@ TLF124
 	goto	TLF126
 ; # asm 
         bcf   STATUS,C
-        rlf   divql,F
+        rlf   divql,F        ; banksel ok here, same as divi
         rlf   divqh,F
         rlf   accl,F
         rlf   acch,F
@@ -2662,10 +2654,99 @@ TLF125
 	goto	TLF124
 TLF126
 	return
+; divide_k ( char constant ) { 
+	;data
+_divide_k	equ	305
+	;code
+divide_k
+	banksel	_divide_k
+	movwf	_divide_k
+; divql = accl ; divqh = acch ; 
+	bcf	STATUS,RP1
+	movf	accl,W
+	movwf	divql
+	movf	acch,W
+	movwf	divqh
+; argh = 0 ; argl = constant ; 
+	movlw	0
+	movwf	argh
+	BANKSEL	_divide_k
+	movf	_divide_k,W
+	bcf	STATUS,RP1
+	movwf	argl
+; divide ( ) ; 
+	call	divide
+; accl = divql ; acch = divqh ; 
+	BANKSEL	divql
+	movf	divql,W
+	movwf	accl
+	movf	divqh,W
+	movwf	acch
+	return
+; } 
+; char multiply ( char multi ) { 
+	;data
+_multiply	equ	306
+	;code
+multiply
+	banksel	_multiply
+	movwf	_multiply
+; static char over ; 
+	;data
+TLF130	equ 307
+; over = 0 ; 
+	;code
+	movlw	0
+	BANKSEL	TLF130
+	movwf	TLF130
+; divi = multi ; 
+	movf	_multiply,W
+	bcf	STATUS,RP1
+	movwf	divi
+; argh = acch ; 
+	movf	acch,W
+	movwf	argh
+; argl = accl ; 
+	movf	accl,W
+	movwf	argl
+; zacc ( ) ; 
+	call	zacc
+; while ( divi ) { 
+TLF131
+	BANKSEL	divi
+	movf	divi,W
+	btfsc	STATUS,Z
+	goto	TLF132
+; if ( divi & 1 ) over |= dadd ( ) ; 
+	movf	divi,W
+	andlw	1
+	btfsc	STATUS,Z
+	goto	TLF133
+	call	dadd
+	BANKSEL	TLF130
+	iorwf	TLF130,F
+; divi >>= 1 ; 
+TLF133
+	BANKSEL	divi
+	bcf	STATUS,C
+	rrf	divi,F
+; # asm 
+          ; banksel argl     ; multi and argl in different banks, fixed by using divi
+          bcf  STATUS,C
+          rlf  argl,F
+          rlf  argh,F
+TLF134
+; } return over ; 
+	goto	TLF131
+TLF132
+	BANKSEL	TLF130
+	movf	TLF130,W
+	return
+; } 
 ; # pragma longcall 
 ; event_check ( char val ) { 
 	;data
-_event_check	equ	305
+_event_check	equ	308
 	;code
 event_check
 	banksel	_event_check
@@ -2677,9 +2758,17 @@ event_check
 	pagesel	event_check
 	return
 ; } 
+; ee_cleanup ( ) { 
+ee_cleanup
+; lc_ee_cleanup ( ) ; 
+	pagesel	lc_ee_cleanup
+	call	lc_ee_cleanup
+	pagesel	ee_cleanup
+	return
+; } 
 ; # asm 
            org  0x800
-TLF130
+TLF135
 ; init ( ) { 
 init
 ; TRISB = 0 ; 
@@ -2713,16 +2802,43 @@ init
 	movlw	0
 	movwf	neg_slip
 	movwf	pos_slip
-; ee_index = in_progress = 0 ; 
+; event_holdoff = ee_index = in_progress = 0 ; 
 	movlw	0
 	movwf	in_progress
 	movwf	ee_index
+	movwf	event_holdoff
 ; dis_event = new_event = 0 ; 
 	movlw	0
 	movwf	new_event
 	movwf	dis_event
-; TMR1H = 0xfc  ; 
+; for ( _temp = 0 ; _temp < 4 ; ++ _temp ) { 
+	movlw	0
+	movwf	_temp
+TLF136
+	movf	_temp,W
+	addlw	252
+	btfsc	STATUS,C
+	goto	TLF138
+; sum_high [ _temp ] = 0 ; 
+	movf	_temp,W
+	addlw	sum_high
+	movwf	FSR
+;movlw	0
+	clrf 	INDF
+; sum_low [ _temp ] = 0 ; 
+	movf	_temp,W
+	addlw	sum_low
+	movwf	FSR
+;movlw	0
+	clrf 	INDF
+; } 
+TLF137
+; ++ _temp )  TMR1H = 0xfc  ; 
+	incf	_temp,F
+	goto	TLF136
+TLF138
 	movlw	252
+	BANKSEL	TMR1H
 	movwf	TMR1H
 ; TMR1L = 0x18  ; 
 	movlw	24
@@ -2776,11 +2892,11 @@ _interrupt
 	movf	dp,W
 	andwf	dig_bit,W
 	btfsc	STATUS,Z
-	goto	TLF131
+	goto	TLF139
 	movlw	128
 	iorwf	portb,F
 ; PORTB = portb ^ 0xff ; 
-TLF131
+TLF139
 	movf	portb,W
 	xorlw	255
 	BANKSEL	PORTB
@@ -2806,7 +2922,7 @@ TLF131
 	movf	dig_count,W
 	addlw	253
 	btfss	STATUS,C
-	goto	TLF132
+	goto	TLF140
 ; dig_count = 0 ; 
 ;movlw	0
 	clrf 	dig_count
@@ -2815,7 +2931,7 @@ TLF131
 	movwf	dig_bit
 ; } 
 ; FSR = fsr_temp ; 
-TLF132
+TLF140
 	movf	fsr_temp,W
 	movwf	FSR
 ; # asm 
@@ -2828,14 +2944,14 @@ TLF132
 	movwf		STATUS			; restore pre-isr STATUS register contents
 	swapf		w_temp,f
 	swapf		w_temp,w		; restore pre-isr W register contents
-TLF133
+TLF141
 	retfie
 ; } # define DEADBAND 5 
 ; # define NOMINAL 117 
 ; # pragma shortcall 
 ; lc_event_check ( char value ) { 
 	;data
-_lc_event_check	equ	306
+_lc_event_check	equ	309
 	;code
 lc_event_check
 	banksel	_lc_event_check
@@ -2844,52 +2960,51 @@ lc_event_check
 	movf	_lc_event_check,W
 	bcf	STATUS,RP1
 	movwf	bank_bug
-; if ( in_progress || event_holdoff >= 1 ) { 
+; if ( in_progress ) { 
 	movf	in_progress,W
-	btfss	STATUS,Z
-	goto	TLF134
-	movf	event_holdoff,W
-	addlw	255
-	btfss	STATUS,C
-	goto	TLF135
-TLF134
+	btfsc	STATUS,Z
+	goto	TLF142
 ; if ( bank_bug > event0 . high ) event0 . high = bank_bug ; 
-	BANKSEL	bank_bug
 	movf	bank_bug,W
 	movwf	_temp
 	movf	event0+2,W
 	subwf	_temp,W
 	btfss	STATUS,Z	;_JLE
 	btfss	STATUS,C
-	goto	TLF136
+	goto	TLF143
 	movf	bank_bug,W
 	movwf	event0+2
 ; if ( bank_bug < event0 . low ) event0 . low = bank_bug ; 
-TLF136
+TLF143
 	BANKSEL	bank_bug
 	movf	bank_bug,W
 	movwf	_temp
 	movf	event0+1,W
 	subwf	_temp,W
 	btfsc	STATUS,C
-	goto	TLF137
+	goto	TLF144
 	movf	bank_bug,W
 	movwf	event0+1
 ; } 
-TLF137
-; } else event0 . low = event0 . high = bank_bug ; 
-	goto	TLF138
-TLF135
-	BANKSEL	bank_bug
+TLF144
+; } else if ( event_holdoff == 0 ) event0 . low = event0 . high = bank_bug ; 
+	goto	TLF145
+TLF142
+	BANKSEL	event_holdoff
+	movf	event_holdoff,W
+;addlw	256
+	btfss	STATUS,Z
+	goto	TLF146
 	movf	bank_bug,W
 	movwf	event0+2
 	movwf	event0+1
-TLF138
 ; if ( in_progress ) { 
+TLF146
+TLF145
 	BANKSEL	in_progress
 	movf	in_progress,W
 	btfsc	STATUS,Z
-	goto	TLF139
+	goto	TLF147
 ; check_end ( value ) ; 
 	BANKSEL	_lc_event_check
 	movf	_lc_event_check,W
@@ -2898,36 +3013,36 @@ TLF138
 	return
 ; } 
 ; if ( event_holdoff ) { 
-TLF139
+TLF147
 	BANKSEL	event_holdoff
 	movf	event_holdoff,W
 	btfsc	STATUS,Z
-	goto	TLF140
+	goto	TLF148
 ; if ( -- event_holdoff == 0 ) event_save ( ) ; 
 	decf	event_holdoff,F
 	movf	event_holdoff,W
 ;addlw	256
 	btfss	STATUS,Z
-	goto	TLF141
+	goto	TLF149
 	call	event_save
 ; } 
-TLF141
+TLF149
 ; } if ( in_band ( value ) ) return ; 
-TLF140
+TLF148
 	BANKSEL	_lc_event_check
 	movf	_lc_event_check,W
 	call	in_band
 	iorlw	0
 	btfsc	STATUS,Z
-	goto	TLF142
+	goto	TLF150
 	return
 ; if ( event_holdoff == 0 ) { 
-TLF142
+TLF150
 	BANKSEL	event_holdoff
 	movf	event_holdoff,W
 ;addlw	256
 	btfss	STATUS,Z
-	goto	TLF143
+	goto	TLF151
 ; event0 . age = days ; 
 	movf	days,W
 	movwf	event0
@@ -2939,7 +3054,7 @@ TLF142
 	movwf	event0+3
 ; } 
 ; in_progress = 1 ; 
-TLF143
+TLF151
 	movlw	1
 	BANKSEL	in_progress
 	movwf	in_progress
@@ -2950,33 +3065,33 @@ TLF143
 ; } 
 ; check_end ( char value ) { 
 	;data
-_check_end	equ	307
+_check_end	equ	310
 	;code
 check_end
 	banksel	_check_end
 	movwf	_check_end
 ; static char t ; 
 	;data
-TLF144	equ 308
+TLF152	equ 311
 ; t = in_band ( value ) ; 
 	;code
 	BANKSEL	_check_end
 	movf	_check_end,W
 	call	in_band
-	BANKSEL	TLF144
-	movwf	TLF144
+	BANKSEL	TLF152
+	movwf	TLF152
 ; if ( t == 0 ) { 
-	movf	TLF144,W
+	movf	TLF152,W
 ;addlw	256
 	btfss	STATUS,Z
-	goto	TLF145
+	goto	TLF153
 ; event_holdoff = 255 ; 
 	movlw	255
 	bcf	STATUS,RP1
 	movwf	event_holdoff
 ; } else { 
-	goto	TLF146
-TLF145
+	goto	TLF154
+TLF153
 ; event1 . age = event0 . age ; 
 	BANKSEL	event0
 	movf	event0,W
@@ -3003,12 +3118,12 @@ TLF145
 ;movlw	0
 	clrf 	in_progress
 ; } 
-TLF146
+TLF154
 	return
 ; } 
 ; char in_band ( char val ) { 
 	;data
-_in_band	equ	309
+_in_band	equ	312
 	;code
 in_band
 	banksel	_in_band
@@ -3018,22 +3133,22 @@ in_band
 	addlw	134
 	btfss	STATUS,Z	;_JLE
 	btfss	STATUS,C
-	goto	TLF147
+	goto	TLF155
 	retlw	0
 ;iorlw	0
 ;return
 ; if ( val < 117  - 5  ) return 0 ; 
-TLF147
+TLF155
 	BANKSEL	_in_band
 	movf	_in_band,W
 	addlw	144
 	btfsc	STATUS,C
-	goto	TLF148
+	goto	TLF156
 	retlw	0
 ;iorlw	0
 ;return
 ; return 1 ; 
-TLF148
+TLF156
 	retlw	1
 ;iorlw	0
 ;return
@@ -3048,11 +3163,11 @@ _eewrite
 
       banksel EECON1
       bsf     EECON1,WREN
-      bcf     INTCON,GIE
+      bcf     INTCON,GIE           ; disable interrupts
       btfsc   INTCON,GIE
       goto    $-2
 
-      movlw   0x55
+      movlw   0x55      
       movwf   EECON2
       movlw   0xaa
       movwf   EECON2
@@ -3069,121 +3184,107 @@ _eewrite
       goto    $-2
       return      
 
-TLF149
+TLF157
 ; event_save ( ) { 
 event_save
 ; static char i ; 
 	;data
-TLF150	equ 310
+TLF158	equ 313
 ; if ( event1 . seconds == 0 && event1 . minutes == 0 && event1 . hours == 0 && event1 . days == 0 ) return ; 
 	;code
 	BANKSEL	event1
 	movf	event1+6,W
 ;addlw	256
 	btfss	STATUS,Z
-	goto	TLF151
+	goto	TLF159
 	movf	event1+5,W
 ;addlw	256
 	btfss	STATUS,Z
-	goto	TLF151
+	goto	TLF159
 	movf	event1+4,W
 ;addlw	256
 	btfss	STATUS,Z
-	goto	TLF151
+	goto	TLF159
 	movf	event1+3,W
 ;addlw	256
 	btfss	STATUS,Z
-	goto	TLF151
+	goto	TLF159
 	return
 ; ee_adr = 17 ; i = ee_index ; 
-TLF151
+TLF159
 	movlw	17
 	BANKSEL	ee_adr
 	movwf	ee_adr
 	movf	ee_index,W
 	bsf	STATUS,RP1
-	movwf	TLF150
+	movwf	TLF158
 ; while ( i -- ) ee_adr += 7 ; 
-TLF152
-	BANKSEL	TLF150
-	movf	TLF150,W
-	decf	TLF150,F
+TLF160
+	BANKSEL	TLF158
+	movf	TLF158,W
+	decf	TLF158,F
 	iorlw	0
 	btfsc	STATUS,Z
-	goto	TLF153
+	goto	TLF161
 	movlw	7
 	bcf	STATUS,RP1
 	addwf	ee_adr,F
-	goto	TLF152
-TLF153
-; _eedata = event1 . age ; 
+	goto	TLF160
+TLF161
+; ee_data = event1 . age ; 
 	BANKSEL	event1
 	movf	event1,W
-	movwf	_eedata
-; # asm 
-     movf  ee_adr,W
-     call _eewrite
-TLF154
+	movwf	ee_data
+; eecheck_write ( ) ; 
+	call	eecheck_write
 ; ++ ee_adr ; 
 	BANKSEL	ee_adr
 	incf	ee_adr,F
-; _eedata = event1 . low ; 
+; ee_data = event1 . low ; 
 	movf	event1+1,W
-	movwf	_eedata
-; # asm 
-     movf  ee_adr,W
-     call _eewrite
-TLF155
+	movwf	ee_data
+; eecheck_write ( ) : 
+	call	eecheck_write
 ; ++ ee_adr ; 
 	BANKSEL	ee_adr
 	incf	ee_adr,F
-; _eedata = event1 . high ; 
+; ee_data = event1 . high ; 
 	movf	event1+2,W
-	movwf	_eedata
-; # asm 
-     movf  ee_adr,W
-     call _eewrite
-TLF156
+	movwf	ee_data
+; eecheck_write ( ) ; 
+	call	eecheck_write
 ; ++ ee_adr ; 
 	BANKSEL	ee_adr
 	incf	ee_adr,F
-; _eedata = event1 . days ; 
+; ee_data = event1 . days ; 
 	movf	event1+3,W
-	movwf	_eedata
-; # asm 
-     movf  ee_adr,W
-     call _eewrite
-TLF157
+	movwf	ee_data
+; eecheck_write ( ) ; 
+	call	eecheck_write
 ; ++ ee_adr ; 
 	BANKSEL	ee_adr
 	incf	ee_adr,F
-; _eedata = event1 . hours ; 
+; ee_data = event1 . hours ; 
 	movf	event1+4,W
-	movwf	_eedata
-; # asm 
-     movf  ee_adr,W
-     call _eewrite
-TLF158
+	movwf	ee_data
+; eecheck_write ( ) ; 
+	call	eecheck_write
 ; ++ ee_adr ; 
 	BANKSEL	ee_adr
 	incf	ee_adr,F
-; _eedata = event1 . minutes ; 
+; ee_data = event1 . minutes ; 
 	movf	event1+5,W
-	movwf	_eedata
-; # asm 
-     movf  ee_adr,W
-     call _eewrite
-TLF159
+	movwf	ee_data
+; eecheck_write ( ) ; 
+	call	eecheck_write
 ; ++ ee_adr ; 
 	BANKSEL	ee_adr
 	incf	ee_adr,F
-; _eedata = event1 . seconds ; 
+; ee_data = event1 . seconds ; 
 	movf	event1+6,W
-	movwf	_eedata
-; # asm 
-     movf  ee_adr,W
-     call _eewrite
-TLF160
+	movwf	ee_data
+; eecheck_write ( ) ; 
+	call	eecheck_write
 ; dis_event = ee_index ; 
 	BANKSEL	ee_index
 	movf	ee_index,W
@@ -3198,6 +3299,85 @@ TLF160
 	movwf	new_event
 	return
 ; } 
+; lc_ee_cleanup ( ) { 
+lc_ee_cleanup
+; static char i ; 
+	;data
+TLF162	equ 314
+; clean_index = 1 ; 
+	;code
+	movlw	1
+	BANKSEL	clean_index
+	movwf	clean_index
+; for ( i = 0 ; i < 32 ; ++ i ) { 
+	movlw	0
+	bsf	STATUS,RP1
+	movwf	TLF162
+TLF163
+	BANKSEL	TLF162
+	movf	TLF162,W
+	addlw	224
+	btfsc	STATUS,C
+	goto	TLF165
+; if ( dummy [ clean_index ] == days ) { 
+	bcf	STATUS,RP1
+	movf	clean_index,W
+	addlw	16
+	call	_eeadr
+	movf	_eedata,W
+	movwf	_temp
+	BANKSEL	days
+	movf	days,W
+	subwf	_temp,W
+	btfss	STATUS,Z
+	goto	TLF166
+; ee_adr = 16 + 4 + clean_index ; 
+	movlw	20
+	addwf	clean_index,W
+	movwf	ee_adr
+; ee_data = 0xff ; 
+	movlw	255
+	movwf	ee_data
+; eecheck_write ( ) ; 
+	call	eecheck_write
+; } 
+; clean_index += 7 ; 
+TLF166
+	movlw	7
+	BANKSEL	clean_index
+	addwf	clean_index,F
+; } 
+TLF164
+; ++ i )  } 
+	BANKSEL	TLF162
+	incf	TLF162,F
+	goto	TLF163
+TLF165
+	return
+; eecheck_write ( ) { 
+eecheck_write
+; if ( ee_data != segment [ ee_adr ] ) { 
+	BANKSEL	ee_adr
+	movf	ee_adr,W
+	addlw	0
+	call	_eeadr
+	BANKSEL	ee_data
+	movf	ee_data,W
+	movwf	_temp
+	movf	_eedata,W
+	subwf	_temp,W
+	btfsc	STATUS,Z
+	goto	TLF167
+; _eedata = ee_data ; 
+	movf	ee_data,W
+	movwf	_eedata
+; # asm 
+          movf ee_adr,W
+          call _eewrite
+TLF168
+; } } 
+TLF167
+	return
 	org	0x2100	;eeprom constant data
 	de	63,6
 	de	91,79
